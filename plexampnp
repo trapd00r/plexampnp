@@ -92,7 +92,6 @@ sub np {
     }
   }
   else {
-    warn "no clients?";
   }
 
   my $now_playing;
