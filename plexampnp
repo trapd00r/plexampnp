@@ -1,7 +1,5 @@
 #!/usr/bin/perl
-
-# TODO: Add support for multiple sessions
-#       Limit to only music sessions
+# TODO: Limit to only music sessions
 #       Limit to only sessions with a certain user
 
 use strict;
@@ -14,12 +12,28 @@ Getopt::Long::Configure qw(bundling);
 
 use XML::Simple;
 use LWP::Simple;
+use Data::Dumper;
+use Term::ExtendedColor qw(fg bold);
 
 my $PLEX_HOST = '192.168.1.34';
 my $PLEX_PORT = '32400';
 my $PLEX_SESS = '/status/sessions';
 
+# the default plexamp player address
+my $PLEXAMP_HOST = '192.168.1.12';
+
 my $PLEX_URL = "http://$PLEX_HOST:$PLEX_PORT$PLEX_SESS";
+
+
+my %colors = (
+  artist => 148,
+  title  => 142,
+  album  => 107,
+  year   => 111,
+  file   => 255,
+);
+
+! @ARGV and say np() and exit;
 
 GetOptions(
   'host=s'   => \$PLEX_HOST,
@@ -31,18 +45,27 @@ GetOptions(
   'y|year'   => sub { say np('year') },
   'f|file'   => sub { say np('file') },
 
-  'h|help'   => sub {
-    say "Usage: $0 [options]";
-    say "  --host\t\tSet the host (default: $PLEX_HOST)";
-    say "  --port\t\tSet the port (default: $PLEX_PORT)";
-    say "  -np\t\t\tPrint the full now playing string";
-    say "  -a, --artist\t\tPrint the artist";
-    say "  -t, --title\t\tPrint the title";
-    say "  -A, --album\t\tPrint the album";
-    say "  -f, --file\t\tPrint the full path to the file";
-    say "  -y, --year\t\tPrint the year";
+  'address=s'  => \$PLEXAMP_HOST,
 
-    say "  -h, --help\t\tThis help";
+  'list-clients'  => sub { list_clients() },
+
+  'h|help'   => sub {
+    say "Usage: $0 [options]
+
+  -a, --artist          Print the artist
+  -t, --title           Print the title
+  -A, --album           Print the album
+  -f, --file            Print the full path to the file
+  -y, --year            Print the year
+      --np              Print the full now playing string (default behaviour)
+      --list-clients    List all plexamp clients playing music
+
+      --host            Plex server host (default: 192.168.1.34)
+      --port            Plex server port (default: 32400)
+      --address         Plexamp client address (default: 192.168.1.12)
+
+  -h, --help        Display this help and exit";
+
     exit;
   },
 
@@ -55,6 +78,22 @@ sub np {
   my $xml_file = get($PLEX_URL);
 
   my $np = XMLin($xml_file, KeyAttr => { Media => 'id' }, ForceArray => [ 'Media' ]);
+
+
+  if(ref($np->{Track}) eq 'ARRAY') {
+    # there are several sessions playing music
+
+    for my $id(sort(keys(@{ $np->{Track} }))) {
+      # we want a specific player
+      if($np->{Track}->[$id]->{Player}->{address} eq $PLEXAMP_HOST) {
+        $np->{Track} = $np->{Track}->[$id];
+        last
+      }
+    }
+  }
+  else {
+    warn "no clients?";
+  }
 
   my $now_playing;
   $now_playing->{artist} = $np->{Track}->{grandparentTitle};
@@ -70,8 +109,26 @@ sub np {
     defined $now_playing->{ $what }
       ? $now_playing->{ $what }
       : sprintf "%s - %s on %s %s",
-          $now_playing->{artist},
-          $now_playing->{title},
-          $now_playing->{album},
-          $now_playing->{year} ? "[$now_playing->{year}]" : '';
+          fg($colors{artist}, sprintf("%s", $now_playing->{artist})),
+          fg($colors{title}, sprintf("%s", $now_playing->{title})),
+          fg($colors{album}, $now_playing->{album}),
+          fg($colors{year}, $now_playing->{year} ? "[$now_playing->{year}]" : '');
+}
+
+sub list_clients {
+  my $xml_file = get($PLEX_URL);
+
+  my $np = XMLin($xml_file, KeyAttr => { Media => 'id' }, ForceArray => [ 'Media' ]);
+
+
+  if(ref($np->{Track}) eq 'ARRAY') {
+    # there are several sessions playing music
+
+    for my $id(sort(keys(@{ $np->{Track} }))) {
+      printf "%s  ", bold($np->{Track}->[$id]->{Player}->{address});
+      $PLEXAMP_HOST = $np->{Track}->[$id]->{Player}->{address};
+      printf "%s\n", np();
+    }
+  }
+  exit
 }
