@@ -7,6 +7,8 @@ use warnings;
 use open qw(:std :utf8);
 use feature 'say';
 
+our $VERSION = '1.2.0';
+
 use Getopt::Long;
 Getopt::Long::Configure qw(bundling);
 
@@ -15,125 +17,332 @@ use LWP::Simple;
 use Data::Dumper;
 use Term::ExtendedColor qw(fg bold);
 use JSON;
+use Config::Tiny;
+use File::HomeDir;
+use Time::Piece;
+use Time::Seconds;
+use File::Temp qw(tempfile);
+use IPC::Run qw(run);
+use File::Path qw(make_path);
 
-my $PLEX_HOST = '192.168.1.34';
-my $PLEX_PORT = '32400';
-my $PLEX_SESS = '/status/sessions';
-
-# the default plexamp player address
-my $PLEXAMP_HOST = '192.168.1.12';
-
-my $PLEX_URL = "http://$PLEX_HOST:$PLEX_PORT$PLEX_SESS";
-
-
-my %colors = (
-  artist => 148,
-  title  => 142,
-  album  => 107,
-  year   => 111,
-  file   => 255,
+# Default configuration
+my %config = (
+    plex => {
+        host => '192.168.1.34',
+        port => '32400',
+        session_path => '/status/sessions',
+    },
+    plexamp => {
+        host => '192.168.1.12',
+    },
+    colors => {
+        artist => 148,
+        title  => 142,
+        album  => 107,
+        year   => 111,
+        file   => 255,
+        time   => 33,
+    },
+    filters => {
+        music_only => 1,
+        user => undef,
+    },
+    cover => {
+        width => 30,  # Width of the cover art in terminal columns
+        height => 15, # Height of the cover art in terminal rows
+    },
 );
 
-! @ARGV and say np() and exit;
+# Get XDG config directory
+my $xdg_config = $ENV{XDG_CONFIG_HOME} || File::HomeDir->my_home . '/.config';
+my $config_dir = "$xdg_config/plexampnp";
+my $config_file = "$config_dir/config";
 
+# Create config directory if it doesn't exist
+unless (-d $config_dir) {
+    make_path($config_dir) or die "Failed to create config directory: $config_dir\n";
+}
+
+# Create default config file if it doesn't exist
+unless (-e $config_file) {
+    my $cfg = Config::Tiny->new;
+    $cfg->{plex} = {
+        host => $config{plex}{host},
+        port => $config{plex}{port},
+        session_path => $config{plex}{session_path},
+    };
+    $cfg->{plexamp} = {
+        host => $config{plexamp}{host},
+    };
+    $cfg->{colors} = {
+        artist => $config{colors}{artist},
+        title  => $config{colors}{title},
+        album  => $config{colors}{album},
+        year   => $config{colors}{year},
+        file   => $config{colors}{file},
+        time   => $config{colors}{time},
+    };
+    $cfg->{filters} = {
+        music_only => $config{filters}{music_only},
+        user => $config{filters}{user},
+    };
+    $cfg->{cover} = {
+        width => $config{cover}{width},
+        height => $config{cover}{height},
+    };
+    $cfg->write($config_file) or die "Failed to write config file: $config_file\n";
+}
+
+# Load configuration file
+if (-e $config_file) {
+    my $cfg = Config::Tiny->read($config_file);
+    if ($cfg) {
+        %config = (%config, %{$cfg});
+    }
+}
+
+# Command line options
 GetOptions(
-  'host=s'   => \$PLEX_HOST,
-  'port=s'   => \$PLEX_PORT,
-  'n|np'     => sub { say np() },
-  'a|artist' => sub { say np('artist') },
-  't|title'  => sub { say np('title') },
-  'A|album'  => sub { say np('album') },
-  'y|year'   => sub { say np('year') },
-  'f|file'   => sub { say np('file') },
-  'j|json'   => sub {
-    my $xml_file = get($PLEX_URL);
-    my $np = XMLin($xml_file, KeyAttr => { Media => 'id' }, ForceArray => [ 'Media' ]);
-    say encode_json($np);
-  },
+    'host=s'   => \$config{plex}{host},
+    'port=s'   => \$config{plex}{port},
+    'address=s' => \$config{plexamp}{host},
+    'user=s'   => \$config{filters}{user},
+    'all-media' => sub { $config{filters}{music_only} = 0 },
+    
+    # Output options
+    'n|np'     => sub { say np() and exit },
+    'a|artist' => sub { say np('artist') and exit },
+    't|title'  => sub { say np('title') and exit },
+    'A|album'  => sub { say np('album') and exit },
+    'y|year'   => sub { say np('year') and exit },
+    'f|file'   => sub { say np('file') and exit },
+    'p|progress' => sub { say np('progress') and exit },
+    'c|cover'  => sub { 
+        my $sessions = get_sessions();
+        my $filtered = filter_sessions($sessions);
+        get_cover_art($filtered->[0]) and exit;
+    },
+    'j|json'   => sub { say get_json() and exit },
+    
+    'list-clients' => sub { list_clients() },
+    
+    'h|help'   => sub { show_help() },
+);
 
-  'address=s'  => \$PLEXAMP_HOST,
+# Default case (no arguments)
+say np();
+exit;
 
-  'list-clients'  => sub { list_clients() },
+sub get_plex_url {
+    return sprintf("http://%s:%s%s",
+        $config{plex}{host},
+        $config{plex}{port},
+        $config{plex}{session_path}
+    );
+}
 
-  'h|help'   => sub {
+sub get_sessions {
+    my $xml_file = get(get_plex_url());
+    die "Failed to connect to Plex server" unless $xml_file;
+    
+    my $sessions = XMLin($xml_file, KeyAttr => { Media => 'id' }, ForceArray => [ 'Media' ]);
+    die "No active sessions found" unless $sessions && $sessions->{Track};
+    
+    return $sessions;
+}
+
+sub filter_sessions {
+    my ($sessions) = @_;
+    
+    if (ref($sessions->{Track}) eq 'ARRAY') {
+        my @filtered;
+        for my $track (@{$sessions->{Track}}) {
+            # Filter by music only if enabled
+            next if $config{filters}{music_only} && 
+                   $track->{type} ne 'track';
+            
+            # Filter by user if specified
+            next if $config{filters}{user} && 
+                   $track->{User}->{title} ne $config{filters}{user};
+            
+            push @filtered, $track;
+        }
+        return \@filtered;
+    }
+    return [$sessions->{Track}];
+}
+
+sub format_time {
+    my ($seconds) = @_;
+    my $t = Time::Piece->new($seconds);
+    return $t->strftime('%M:%S');
+}
+
+sub get_cover_art {
+    my $track = shift;
+    
+    # Get the cover art URL from the track metadata
+    my $thumb = $track->{thumb};
+    return unless $thumb;
+    
+    # Create a temporary file for the cover art
+    my ($fh, $tempfile) = tempfile(SUFFIX => '.jpg');
+    close $fh;
+    
+    # Download the cover art
+    my $url = "http://$config{plex}{host}:$config{plex}{port}$thumb";
+    getstore($url, $tempfile);
+    
+    # Try to display the cover art using available tools
+    my $success = 0;
+    
+    # Try chafa first
+    if (system('which chafa > /dev/null 2>&1') == 0) {
+        my $cmd = [
+            'chafa',
+            '--size', "$config{cover}{width}x$config{cover}{height}",
+            '--symbols', 'block',
+            $tempfile
+        ];
+        if (run($cmd)) {
+            $success = 1;
+        }
+    }
+    
+    # Try viu if chafa failed
+    if (!$success && system('which viu > /dev/null 2>&1') == 0) {
+        my $cmd = [
+            'viu',
+            '-w', $config{cover}{width},
+            '-h', $config{cover}{height},
+            $tempfile
+        ];
+        if (run($cmd)) {
+            $success = 1;
+        }
+    }
+    
+    # Clean up the temporary file
+    unlink $tempfile;
+    
+    return $success;
+}
+
+sub np {
+    my $what = shift // 'np';
+    
+    my $sessions = get_sessions();
+    my $filtered = filter_sessions($sessions);
+    
+    # Find the specific player if requested
+    my $track;
+    if ($config{plexamp}{host}) {
+        for my $t (@$filtered) {
+            if ($t->{Player}->{address} eq $config{plexamp}{host}) {
+                $track = $t;
+                last;
+            }
+        }
+    } else {
+        $track = $filtered->[0];
+    }
+    
+    die "No matching session found" unless $track;
+    
+    # Validate and sanitize track data
+    my $now_playing = {
+        artist   => defined($track->{grandparentTitle}) ? $track->{grandparentTitle} : 'Unknown Artist',
+        album    => defined($track->{parentTitle}) ? $track->{parentTitle} : 'Unknown Album',
+        title    => defined($track->{title}) ? $track->{title} : 'Unknown Title',
+        year     => defined($track->{parentYear}) ? $track->{parentYear} : undef,
+        progress => {
+            current => defined($track->{viewOffset}) ? $track->{viewOffset} / 1000 : 0,
+            total   => defined($track->{duration}) ? $track->{duration} / 1000 : 0,
+        },
+        thumb    => $track->{thumb},
+    };
+    
+    # Get file path if available
+    if (defined($track->{Media}) && ref($track->{Media}) eq 'HASH') {
+        for my $id (keys %{$track->{Media}}) {
+            if (defined($track->{Media}->{$id}->{Part}->{file})) {
+                $now_playing->{file} = $track->{Media}->{$id}->{Part}->{file};
+                last;
+            }
+        }
+    }
+    
+    # Handle specific field requests
+    if ($what ne 'np') {
+        return $now_playing->{$what} if defined $now_playing->{$what};
+        return '';  # Return empty string for undefined fields
+    }
+    
+    # Format progress if available
+    my $progress_str = '';
+    if ($now_playing->{progress}{total} > 0) {
+        $progress_str = sprintf(" %s / %s",
+            fg($config{colors}{time}, format_time($now_playing->{progress}{current})),
+            fg($config{colors}{time}, format_time($now_playing->{progress}{total}))
+        );
+    }
+    
+    # Format year if available
+    my $year_str = '';
+    if (defined $now_playing->{year}) {
+        $year_str = fg($config{colors}{year}, " [$now_playing->{year}]");
+    }
+    
+    return sprintf "%s - %s on %s%s%s",
+        fg($config{colors}{artist}, $now_playing->{artist}),
+        fg($config{colors}{title}, $now_playing->{title}),
+        fg($config{colors}{album}, $now_playing->{album}),
+        $year_str,
+        $progress_str;
+}
+
+sub get_json {
+    my $sessions = get_sessions();
+    return encode_json($sessions);
+}
+
+sub list_clients {
+    my $sessions = get_sessions();
+    my $filtered = filter_sessions($sessions);
+    
+    for my $track (@$filtered) {
+        printf "%s (%s)  ", 
+            bold($track->{Player}->{address}),
+            $track->{User}->{title};
+        $config{plexamp}{host} = $track->{Player}->{address};
+        printf "%s\n", np();
+    }
+    exit;
+}
+
+sub show_help {
     say "Usage: $0 [options]
 
+Options:
   -a, --artist          Print the artist
   -t, --title           Print the title
   -A, --album           Print the album
   -f, --file            Print the full path to the file
   -y, --year            Print the year
-      --np              Print the full now playing string (default behaviour)
+  -p, --progress        Print progress information
+  -c, --cover           Display album cover art
+      --np              Print the full now playing string (default)
       --list-clients    List all plexamp clients playing music
+      --all-media       Show all media types (not just music)
+      --user USER       Filter by specific user
 
-      --host            Plex server host (default: 192.168.1.34)
-      --port            Plex server port (default: 32400)
-      --address         Plexamp client address (default: 192.168.1.12)
+Configuration:
+      --host HOST       Plex server host
+      --port PORT       Plex server port
+      --address ADDR    Plexamp client address
 
-  -h, --help        Display this help and exit";
+  -h, --help            Display this help and exit
 
+Configuration file: ~/.plexampnp.conf";
     exit;
-  },
-
-);
-
-
-sub np {
-  my $what = shift // 'np';
-
-  my $xml_file = get($PLEX_URL);
-
-  my $np = XMLin($xml_file, KeyAttr => { Media => 'id' }, ForceArray => [ 'Media' ]);
-
-
-  if(ref($np->{Track}) eq 'ARRAY') {
-    # there are several sessions playing music
-
-    for my $id(sort(keys(@{ $np->{Track} }))) {
-      # we want a specific player
-      if($np->{Track}->[$id]->{Player}->{address} eq $PLEXAMP_HOST) {
-        $np->{Track} = $np->{Track}->[$id];
-        last
-      }
-    }
-  }
-  else {
-  }
-
-  my $now_playing;
-  $now_playing->{artist} = $np->{Track}->{grandparentTitle};
-  $now_playing->{album}  = $np->{Track}->{parentTitle};
-  $now_playing->{title}  = $np->{Track}->{title};
-  $now_playing->{year}   = $np->{Track}->{parentYear};
-
-  for my $id(keys(%{ $np->{Track}->{Media} })) {
-    $now_playing->{file} = $np->{Track}->{Media}->{$id}->{Part}->{file};
-  }
-
-  return
-    defined $now_playing->{ $what }
-      ? $now_playing->{ $what }
-      : sprintf "%s - %s on %s %s",
-          fg($colors{artist}, sprintf("%s", $now_playing->{artist})),
-          fg($colors{title}, sprintf("%s", $now_playing->{title})),
-          fg($colors{album}, $now_playing->{album}),
-          fg($colors{year}, $now_playing->{year} ? "[$now_playing->{year}]" : '');
-}
-
-sub list_clients {
-  my $xml_file = get($PLEX_URL);
-
-  my $np = XMLin($xml_file, KeyAttr => { Media => 'id' }, ForceArray => [ 'Media' ]);
-
-
-  if(ref($np->{Track}) eq 'ARRAY') {
-    # there are several sessions playing music
-
-    for my $id(sort(keys(@{ $np->{Track} }))) {
-      printf "%s  ", bold($np->{Track}->[$id]->{Player}->{address});
-      $PLEXAMP_HOST = $np->{Track}->[$id]->{Player}->{address};
-      printf "%s\n", np();
-    }
-  }
-  exit
 }
