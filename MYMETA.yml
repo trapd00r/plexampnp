@@ -1,0 +1,37 @@
+---
+abstract: 'Now playing information for Plexamp'
+author:
+  - <m@japh.se
+build_requires:
+  ExtUtils::MakeMaker: '0'
+configure_requires:
+  ExtUtils::MakeMaker: '0'
+dynamic_config: 0
+generated_by: 'ExtUtils::MakeMaker version 7.70, CPAN::Meta::Converter version 2.150010'
+license: perl
+meta-spec:
+  url: http://module-build.sourceforge.net/META-spec-v1.4.html
+  version: '1.4'
+name: App-Plexampnp
+no_index:
+  directory:
+    - t
+    - inc
+requires:
+  Config::Tiny: '0'
+  Data::Dumper: '0'
+  File::HomeDir: '0'
+  File::Temp: '0'
+  Getopt::Long: '0'
+  IPC::Run: '0'
+  JSON: '0'
+  LWP::Simple: '0'
+  Term::ExtendedColor: '0'
+  Time::Piece: '0'
+  Time::Seconds: '0'
+  XML::Simple: '0'
+  perl: '5.010'
+resources:
+  repository: https://github.com/trapd00r/plexampnp.git
+version: v1.3.0
+x_serialization_backend: 'CPAN::Meta::YAML version 0.018'

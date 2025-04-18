@@ -4,10 +4,11 @@
 
 use strict;
 use warnings;
+use utf8;
 use open qw(:std :utf8);
 use feature 'say';
 
-our $VERSION = '1.2.0';
+our $VERSION = '1.3.0';
 
 use Getopt::Long;
 Getopt::Long::Configure qw(bundling);
@@ -24,9 +25,10 @@ use Time::Seconds;
 use File::Temp qw(tempfile);
 use IPC::Run qw(run);
 use File::Path qw(make_path);
+use File::Spec::Functions qw(catdir);
 
 # Default configuration
-my %config = (
+our %config = (
     plex => {
         host => '192.168.1.34',
         port => '32400',
@@ -41,7 +43,6 @@ my %config = (
         album  => 107,
         year   => 111,
         file   => 255,
-        time   => 33,
     },
     filters => {
         music_only => 1,
@@ -51,16 +52,32 @@ my %config = (
         width => 30,  # Width of the cover art in terminal columns
         height => 15, # Height of the cover art in terminal rows
     },
+    db => {
+        host => '192.168.1.7',
+        port => 3306,
+        dbname => 'music',
+        user => 'admin',
+        pass => 'password',
+    },
+    plugins => {
+        enabled => [],
+    },
 );
 
 # Get XDG config directory
 my $xdg_config = $ENV{XDG_CONFIG_HOME} || File::HomeDir->my_home . '/.config';
 my $config_dir = "$xdg_config/plexampnp";
 my $config_file = "$config_dir/config";
+my $plugins_dir = "$config_dir/plugins";
 
 # Create config directory if it doesn't exist
 unless (-d $config_dir) {
     make_path($config_dir) or die "Failed to create config directory: $config_dir\n";
+}
+
+# Create plugins directory if it doesn't exist
+unless (-d $plugins_dir) {
+    make_path($plugins_dir) or die "Failed to create plugins directory: $plugins_dir\n";
 }
 
 # Create default config file if it doesn't exist
@@ -80,7 +97,6 @@ unless (-e $config_file) {
         album  => $config{colors}{album},
         year   => $config{colors}{year},
         file   => $config{colors}{file},
-        time   => $config{colors}{time},
     };
     $cfg->{filters} = {
         music_only => $config{filters}{music_only},
@@ -90,6 +106,16 @@ unless (-e $config_file) {
         width => $config{cover}{width},
         height => $config{cover}{height},
     };
+    $cfg->{db} = {
+        host => $config{db}{host},
+        port => $config{db}{port},
+        dbname => $config{db}{dbname},
+        user => $config{db}{user},
+        pass => $config{db}{pass},
+    };
+    $cfg->{plugins} = {
+        enabled => join(',', @{$config{plugins}{enabled}}),
+    };
     $cfg->write($config_file) or die "Failed to write config file: $config_file\n";
 }
 
@@ -98,6 +124,21 @@ if (-e $config_file) {
     my $cfg = Config::Tiny->read($config_file);
     if ($cfg) {
         %config = (%config, %{$cfg});
+        # Convert comma-separated plugins list to array
+        if ($cfg->{plugins}->{enabled}) {
+            $config{plugins}{enabled} = [split(/\s*,\s*/, $cfg->{plugins}->{enabled})];
+        }
+    }
+}
+
+# Load plugins
+my %plugins;
+for my $plugin_name (@{$config{plugins}{enabled}}) {
+    my $plugin_file = "$plugins_dir/$plugin_name.pm";
+    if (-e $plugin_file) {
+        require $plugin_file;
+        $plugins{$plugin_name} = $plugin_name->new();
+        warn "Loaded plugin: $plugin_name\n";
     }
 }
 
@@ -108,7 +149,7 @@ GetOptions(
     'address=s' => \$config{plexamp}{host},
     'user=s'   => \$config{filters}{user},
     'all-media' => sub { $config{filters}{music_only} = 0 },
-    
+
     # Output options
     'n|np'     => sub { say np() and exit },
     'a|artist' => sub { say np('artist') and exit },
@@ -116,16 +157,33 @@ GetOptions(
     'A|album'  => sub { say np('album') and exit },
     'y|year'   => sub { say np('year') and exit },
     'f|file'   => sub { say np('file') and exit },
-    'p|progress' => sub { say np('progress') and exit },
-    'c|cover'  => sub { 
+    'c|cover'  => sub {
         my $sessions = get_sessions();
         my $filtered = filter_sessions($sessions);
         get_cover_art($filtered->[0]) and exit;
     },
+    's|scrobbles' => sub {
+        if ($plugins{Scrobbles}) {
+            my $sessions = get_sessions();
+            my $filtered = filter_sessions($sessions);
+            my $scrobbles = $plugins{Scrobbles}->get_scrobbles($filtered->[0]);
+            if ($scrobbles && $scrobbles->{scrobble_count}) {
+                say sprintf("Scrobbles: %d\nFirst: %s\nLast: %s",
+                    $scrobbles->{scrobble_count},
+                    $scrobbles->{first_scrobble},
+                    $scrobbles->{latest_scrobble}
+                );
+            } else {
+                say "No scrobbles found for this track";
+            }
+            exit;
+        }
+        die "Scrobbles plugin not enabled. Please enable it in your config file.\n";
+    },
     'j|json'   => sub { say get_json() and exit },
-    
+
     'list-clients' => sub { list_clients() },
-    
+
     'h|help'   => sub { show_help() },
 );
 
@@ -144,27 +202,27 @@ sub get_plex_url {
 sub get_sessions {
     my $xml_file = get(get_plex_url());
     die "Failed to connect to Plex server" unless $xml_file;
-    
+
     my $sessions = XMLin($xml_file, KeyAttr => { Media => 'id' }, ForceArray => [ 'Media' ]);
     die "No active sessions found" unless $sessions && $sessions->{Track};
-    
+
     return $sessions;
 }
 
 sub filter_sessions {
     my ($sessions) = @_;
-    
+
     if (ref($sessions->{Track}) eq 'ARRAY') {
         my @filtered;
         for my $track (@{$sessions->{Track}}) {
             # Filter by music only if enabled
-            next if $config{filters}{music_only} && 
+            next if $config{filters}{music_only} &&
                    $track->{type} ne 'track';
-            
+
             # Filter by user if specified
-            next if $config{filters}{user} && 
+            next if $config{filters}{user} &&
                    $track->{User}->{title} ne $config{filters}{user};
-            
+
             push @filtered, $track;
         }
         return \@filtered;
@@ -180,22 +238,22 @@ sub format_time {
 
 sub get_cover_art {
     my $track = shift;
-    
+
     # Get the cover art URL from the track metadata
     my $thumb = $track->{thumb};
     return unless $thumb;
-    
+
     # Create a temporary file for the cover art
     my ($fh, $tempfile) = tempfile(SUFFIX => '.jpg');
     close $fh;
-    
+
     # Download the cover art
     my $url = "http://$config{plex}{host}:$config{plex}{port}$thumb";
     getstore($url, $tempfile);
-    
+
     # Try to display the cover art using available tools
     my $success = 0;
-    
+
     # Try chafa first
     if (system('which chafa > /dev/null 2>&1') == 0) {
         my $cmd = [
@@ -208,7 +266,7 @@ sub get_cover_art {
             $success = 1;
         }
     }
-    
+
     # Try viu if chafa failed
     if (!$success && system('which viu > /dev/null 2>&1') == 0) {
         my $cmd = [
@@ -221,19 +279,19 @@ sub get_cover_art {
             $success = 1;
         }
     }
-    
+
     # Clean up the temporary file
     unlink $tempfile;
-    
+
     return $success;
 }
 
 sub np {
     my $what = shift // 'np';
-    
+
     my $sessions = get_sessions();
     my $filtered = filter_sessions($sessions);
-    
+
     # Find the specific player if requested
     my $track;
     if ($config{plexamp}{host}) {
@@ -246,22 +304,18 @@ sub np {
     } else {
         $track = $filtered->[0];
     }
-    
+
     die "No matching session found" unless $track;
-    
+
     # Validate and sanitize track data
     my $now_playing = {
         artist   => defined($track->{grandparentTitle}) ? $track->{grandparentTitle} : 'Unknown Artist',
         album    => defined($track->{parentTitle}) ? $track->{parentTitle} : 'Unknown Album',
         title    => defined($track->{title}) ? $track->{title} : 'Unknown Title',
         year     => defined($track->{parentYear}) ? $track->{parentYear} : undef,
-        progress => {
-            current => defined($track->{viewOffset}) ? $track->{viewOffset} / 1000 : 0,
-            total   => defined($track->{duration}) ? $track->{duration} / 1000 : 0,
-        },
         thumb    => $track->{thumb},
     };
-    
+
     # Get file path if available
     if (defined($track->{Media}) && ref($track->{Media}) eq 'HASH') {
         for my $id (keys %{$track->{Media}}) {
@@ -271,26 +325,30 @@ sub np {
             }
         }
     }
-    
+
     # Handle specific field requests
     if ($what ne 'np') {
         return $now_playing->{$what} if defined $now_playing->{$what};
         return '';  # Return empty string for undefined fields
     }
-    
-    # Format progress if available
-    my $progress_str = '';
-    if ($now_playing->{progress}{total} > 0) {
-        $progress_str = sprintf(" %s / %s",
-            fg($config{colors}{time}, format_time($now_playing->{progress}{current})),
-            fg($config{colors}{time}, format_time($now_playing->{progress}{total}))
-        );
-    }
-    
+
     # Format year if available
     my $year_str = '';
     if (defined $now_playing->{year}) {
         $year_str = fg($config{colors}{year}, " [$now_playing->{year}]");
+    }
+    
+    # Format scrobbles if available
+    my $scrobbles_str = '';
+    if ($plugins{Scrobbles}) {
+        my $scrobbles = $plugins{Scrobbles}->get_scrobbles($now_playing);
+        if ($scrobbles && $scrobbles->{scrobble_count}) {
+            $scrobbles_str = sprintf(" [%d× %s→%s]",
+                $scrobbles->{scrobble_count},
+                $scrobbles->{first_scrobble},
+                $scrobbles->{latest_scrobble}
+            );
+        }
     }
     
     return sprintf "%s - %s on %s%s%s",
@@ -298,7 +356,7 @@ sub np {
         fg($config{colors}{title}, $now_playing->{title}),
         fg($config{colors}{album}, $now_playing->{album}),
         $year_str,
-        $progress_str;
+        $scrobbles_str;
 }
 
 sub get_json {
@@ -309,9 +367,9 @@ sub get_json {
 sub list_clients {
     my $sessions = get_sessions();
     my $filtered = filter_sessions($sessions);
-    
+
     for my $track (@$filtered) {
-        printf "%s (%s)  ", 
+        printf "%s (%s)  ",
             bold($track->{Player}->{address}),
             $track->{User}->{title};
         $config{plexamp}{host} = $track->{Player}->{address};
@@ -329,8 +387,8 @@ Options:
   -A, --album           Print the album
   -f, --file            Print the full path to the file
   -y, --year            Print the year
-  -p, --progress        Print progress information
   -c, --cover           Display album cover art
+  -s, --scrobbles       Display scrobble information (requires Scrobbles plugin)
       --np              Print the full now playing string (default)
       --list-clients    List all plexamp clients playing music
       --all-media       Show all media types (not just music)
@@ -343,6 +401,6 @@ Configuration:
 
   -h, --help            Display this help and exit
 
-Configuration file: ~/.plexampnp.conf";
+Configuration file: \$XDG_CONFIG_HOME/plexampnp/config (default: ~/.config/plexampnp/config)";
     exit;
 }

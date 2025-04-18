@@ -2,7 +2,18 @@
 
 All notable changes to the `plexampnp` script will be documented in this file.
 
-## [1.2.0] - 2024-03-21
+## [1.3.0] - 2024-04-18
+### Changed
+- Removed progress bar functionality
+- Improved UTF-8 handling for scrobble information
+- Updated plugin system to properly handle plugin instances
+
+### Added
+- Scrobbles plugin support with scrobble count and date range display
+- Plugin system for extending functionality
+- Database configuration support
+
+## [1.2.0] - 2024-04-17
 
 ### Added
 - Album cover art display in terminal (`-c, --cover` option)
