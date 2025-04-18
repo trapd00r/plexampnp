@@ -11,6 +11,7 @@ A Perl script to display currently playing music from Plexamp in your terminal.
 - Scrobbles plugin to show play history from a MySQL database
 - Colorized output
 - XDG config directory support
+- Simple scrobble count output for status bars
 
 ## Installation
 
@@ -86,7 +87,8 @@ plexampnp --file
 plexampnp --cover
 
 # Show scrobble information
-plexampnp --scrobbles
+plexampnp --scrobbles  # Full output with dates
+plexampnp -s           # Simple count only (useful for status bars)
 
 # List all playing clients
 plexampnp --list-clients
@@ -95,12 +97,18 @@ plexampnp --list-clients
 plexampnp --help
 ```
 
+### Example Output
+
+```
+Artist - Title on Album [Year] [19x 2013-10-09..2025-04-12]
+```
+
 ## Plugins
 
 ### Scrobbles Plugin
 
 The Scrobbles plugin displays play history information from a MySQL database. It shows:
-- Number of times a track has been played
+- Number of times a track has been played (e.g., "19x")
 - First play date
 - Last play date
 
@@ -110,6 +118,19 @@ To enable the plugin, add it to the `enabled` list in your config file:
 [plugins]
 enabled = Scrobbles
 ```
+
+### Status Bar Integration
+
+The `-s` flag provides a simple scrobble count output that's perfect for status bars like polybar:
+
+```ini
+[module/plexampnp]
+type = custom/script
+exec = plexampnp -s
+interval = 1
+```
+
+This will display just the number of scrobbles (e.g., "19") in your status bar. For full scrobble information including dates, use `--scrobbles` instead.
 
 ## Requirements
 

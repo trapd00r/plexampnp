@@ -8,7 +8,7 @@ use utf8;
 use open qw(:std :utf8);
 use feature 'say';
 
-our $VERSION = '1.3.0';
+our $VERSION = '1.3.1';
 
 use Getopt::Long;
 Getopt::Long::Configure qw(bundling);
@@ -138,7 +138,6 @@ for my $plugin_name (@{$config{plugins}{enabled}}) {
     if (-e $plugin_file) {
         require $plugin_file;
         $plugins{$plugin_name} = $plugin_name->new();
-        # warn "Loaded plugin: $plugin_name\n";
     }
 }
 
@@ -149,7 +148,7 @@ GetOptions(
     'address=s' => \$config{plexamp}{host},
     'user=s'   => \$config{filters}{user},
     'all-media' => sub { $config{filters}{music_only} = 0 },
-
+    
     # Output options
     'n|np'     => sub { say np() and exit },
     'a|artist' => sub { say np('artist') and exit },
@@ -157,16 +156,52 @@ GetOptions(
     'A|album'  => sub { say np('album') and exit },
     'y|year'   => sub { say np('year') and exit },
     'f|file'   => sub { say np('file') and exit },
-    'c|cover'  => sub {
+    'c|cover'  => sub { 
         my $sessions = get_sessions();
         my $filtered = filter_sessions($sessions);
         get_cover_art($filtered->[0]) and exit;
     },
-    's|scrobbles' => sub {
+    's'        => sub {  # Simple scrobble count
         if ($plugins{Scrobbles}) {
             my $sessions = get_sessions();
             my $filtered = filter_sessions($sessions);
-            my $scrobbles = $plugins{Scrobbles}->get_scrobbles($filtered->[0]);
+            my $track = $filtered->[0];
+            
+            # Create the same data structure as np()
+            my $now_playing = {
+                artist   => defined($track->{grandparentTitle}) ? $track->{grandparentTitle} : 'Unknown Artist',
+                album    => defined($track->{parentTitle}) ? $track->{parentTitle} : 'Unknown Album',
+                title    => defined($track->{title}) ? $track->{title} : 'Unknown Title',
+                year     => defined($track->{parentYear}) ? $track->{parentYear} : undef,
+                thumb    => $track->{thumb},
+            };
+            
+            my $scrobbles = $plugins{Scrobbles}->get_scrobbles($now_playing);
+            if ($scrobbles && $scrobbles->{scrobble_count}) {
+                say $scrobbles->{scrobble_count};
+            } else {
+                say "0";
+            }
+            exit;
+        }
+        die "Scrobbles plugin not enabled. Please enable it in your config file.\n";
+    },
+    'scrobbles' => sub {  # Full scrobble information
+        if ($plugins{Scrobbles}) {
+            my $sessions = get_sessions();
+            my $filtered = filter_sessions($sessions);
+            my $track = $filtered->[0];
+            
+            # Create the same data structure as np()
+            my $now_playing = {
+                artist   => defined($track->{grandparentTitle}) ? $track->{grandparentTitle} : 'Unknown Artist',
+                album    => defined($track->{parentTitle}) ? $track->{parentTitle} : 'Unknown Album',
+                title    => defined($track->{title}) ? $track->{title} : 'Unknown Title',
+                year     => defined($track->{parentYear}) ? $track->{parentYear} : undef,
+                thumb    => $track->{thumb},
+            };
+            
+            my $scrobbles = $plugins{Scrobbles}->get_scrobbles($now_playing);
             if ($scrobbles && $scrobbles->{scrobble_count}) {
                 say sprintf("Scrobbles: %d\nFirst: %s\nLast: %s",
                     $scrobbles->{scrobble_count},
@@ -181,9 +216,9 @@ GetOptions(
         die "Scrobbles plugin not enabled. Please enable it in your config file.\n";
     },
     'j|json'   => sub { say get_json() and exit },
-
+    
     'list-clients' => sub { list_clients() },
-
+    
     'h|help'   => sub { show_help() },
 );
 
@@ -343,7 +378,7 @@ sub np {
     if ($plugins{Scrobbles}) {
         my $scrobbles = $plugins{Scrobbles}->get_scrobbles($now_playing);
         if ($scrobbles && $scrobbles->{scrobble_count}) {
-            $scrobbles_str = sprintf(" [%d× %s→%s]",
+            $scrobbles_str = sprintf(" [%dx %s..%s]",
                 $scrobbles->{scrobble_count},
                 $scrobbles->{first_scrobble},
                 $scrobbles->{latest_scrobble}
@@ -388,7 +423,8 @@ Options:
   -f, --file            Print the full path to the file
   -y, --year            Print the year
   -c, --cover           Display album cover art
-  -s, --scrobbles       Display scrobble information (requires Scrobbles plugin)
+  -s                    Print scrobble count only (useful for status bars)
+      --scrobbles       Display full scrobble information
       --np              Print the full now playing string (default)
       --list-clients    List all plexamp clients playing music
       --all-media       Show all media types (not just music)

@@ -2,16 +2,23 @@
 
 All notable changes to the `plexampnp` script will be documented in this file.
 
+## [1.3.1] - 2024-04-18
+### Changed
+- Simplified scrobble format to use "x" and ".." instead of emojis
+- Improved readability of scrobble output
+
 ## [1.3.0] - 2024-04-18
 ### Changed
 - Removed progress bar functionality
 - Improved UTF-8 handling for scrobble information
 - Updated plugin system to properly handle plugin instances
+- Separated scrobble output options into `-s` (count only) and `--scrobbles` (full info)
 
 ### Added
 - Scrobbles plugin support with scrobble count and date range display
 - Plugin system for extending functionality
 - Database configuration support
+- Simple scrobble count output (`-s`) for status bar integration
 
 ## [1.2.0] - 2024-04-17
 
