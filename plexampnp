@@ -138,7 +138,7 @@ for my $plugin_name (@{$config{plugins}{enabled}}) {
     if (-e $plugin_file) {
         require $plugin_file;
         $plugins{$plugin_name} = $plugin_name->new();
-        warn "Loaded plugin: $plugin_name\n";
+        # warn "Loaded plugin: $plugin_name\n";
     }
 }
 
